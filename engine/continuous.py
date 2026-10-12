@@ -12,13 +12,15 @@ class Request:
 
 
 @torch.no_grad()
-def generate_continuous(model, requests, n_slots, max_len=512):
+def generate_continuous(model, requests, n_slots, max_len=512, stats=None):  # NEW
     cache = SlotCache(model, n_slots, max_len)
     device = cache.lens.device
     queue = list(requests)
     slot_req = [None] * n_slots
     cur = torch.zeros(n_slots, 1, dtype=torch.long, device=device)
     results = {}
+    if stats is not None:                                    # NEW
+        stats.update(decode_steps=0, prefills=0)             # NEW
 
     def finish(s, req):
         results[req.rid] = torch.cat([req.prompt[0].cpu(), torch.tensor(req.out)])
@@ -36,6 +38,8 @@ def generate_continuous(model, requests, n_slots, max_len=512):
                 req.out.append(nid)
                 cur[s, 0] = nid
                 slot_req[s] = req
+                if stats is not None:                        # NEW
+                    stats["prefills"] += 1                   # NEW
                 if len(req.out) >= req.max_new_tokens:
                     finish(s, req)
 
@@ -43,6 +47,8 @@ def generate_continuous(model, requests, n_slots, max_len=512):
             continue
 
         logits = model_decode(model, cur, cache)
+        if stats is not None:                                # NEW
+            stats["decode_steps"] += 1                       # NEW
         cur = logits[:, -1, :].argmax(dim=-1, keepdim=True)
         toks = cur[:, 0].tolist()
 

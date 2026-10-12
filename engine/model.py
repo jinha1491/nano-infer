@@ -21,7 +21,7 @@ class Attention(nn.Module):
         self.c_attn = nn.Linear(d, 3 * d)
         self.c_proj = nn.Linear(d, d)
 
-    def forward(self, x):
+    def forward(self, x, kv=None):                            # NEW
         B, T, C = x.shape
         q, k, v = self.c_attn(x).split(C, dim=-1)
 
@@ -29,14 +29,21 @@ class Attention(nn.Module):
         k = k.view(B, T, self.n_head, self.d_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, self.d_head).transpose(1, 2)
 
+        if kv is not None:                                    # NEW
+            k = torch.cat([kv[0], k], dim=2)                  # NEW
+            v = torch.cat([kv[1], v], dim=2)                  # NEW
+        new_kv = (k, v)                                       # NEW
+        T_k = k.size(2)                                       # NEW
+
         att = (q @ k.transpose(-2, -1)) / (self.d_head ** 0.5)
-        mask = torch.tril(torch.ones(T, T, dtype=torch.bool, device=x.device))
+        mask = torch.tril(torch.ones(T, T_k, dtype=torch.bool, device=x.device),
+                          diagonal=T_k - T)                   # NEW
         att = att.masked_fill(~mask, float("-inf"))
         att = F.softmax(att, dim=-1)
 
         y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.c_proj(y)
+        return self.c_proj(y), new_kv                         # NEW
 
 
 class Block(nn.Module):
@@ -47,10 +54,11 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(d)
         self.mlp = MLP(d)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, kv=None):                            # NEW
+        a, new_kv = self.attn(self.ln_1(x), kv)               # NEW
+        x = x + a                                             # NEW
         x = x + self.mlp(self.ln_2(x))
-        return x
+        return x, new_kv                                      # NEW
 
 
 class GPT2(nn.Module):
@@ -63,14 +71,17 @@ class GPT2(nn.Module):
         self.lm_head = nn.Linear(d, vocab, bias=False)
         self.lm_head.weight = self.wte.weight
 
-    def forward(self, idx):
+    def forward(self, idx, cache=None):                       # NEW
         B, T = idx.shape
-        pos = torch.arange(T, device=idx.device)
+        past = cache[0][0].size(2) if cache is not None else 0     # NEW
+        pos = torch.arange(past, past + T, device=idx.device)      # NEW
         x = self.wte(idx) + self.wpe(pos)
-        for block in self.h:
-            x = block(x)
+        new_cache = []                                        # NEW
+        for i, block in enumerate(self.h):                    # NEW
+            x, kv = block(x, cache[i] if cache is not None else None)  # NEW
+            new_cache.append(kv)                              # NEW
         x = self.ln_f(x)
-        return self.lm_head(x)
+        return self.lm_head(x), new_cache                     # NEW
 
     @classmethod
     def from_pretrained(cls, name="gpt2"):

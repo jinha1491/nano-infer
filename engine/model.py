@@ -21,7 +21,7 @@ class Attention(nn.Module):
         self.c_attn = nn.Linear(d, 3 * d)
         self.c_proj = nn.Linear(d, d)
 
-    def forward(self, x, kv=None):                            # NEW
+    def forward(self, x, kv=None):
         B, T, C = x.shape
         q, k, v = self.c_attn(x).split(C, dim=-1)
 
@@ -29,21 +29,21 @@ class Attention(nn.Module):
         k = k.view(B, T, self.n_head, self.d_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, self.d_head).transpose(1, 2)
 
-        if kv is not None:                                    # NEW
-            k = torch.cat([kv[0], k], dim=2)                  # NEW
-            v = torch.cat([kv[1], v], dim=2)                  # NEW
-        new_kv = (k, v)                                       # NEW
-        T_k = k.size(2)                                       # NEW
+        if kv is not None:
+            k = torch.cat([kv[0], k], dim=2)
+            v = torch.cat([kv[1], v], dim=2)
+        new_kv = (k, v)
+        T_k = k.size(2)
 
         att = (q @ k.transpose(-2, -1)) / (self.d_head ** 0.5)
         mask = torch.tril(torch.ones(T, T_k, dtype=torch.bool, device=x.device),
-                          diagonal=T_k - T)                   # NEW
+                          diagonal=T_k - T)
         att = att.masked_fill(~mask, float("-inf"))
         att = F.softmax(att, dim=-1)
 
         y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.c_proj(y), new_kv                         # NEW
+        return self.c_proj(y), new_kv
 
 
 class Block(nn.Module):
@@ -54,11 +54,11 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(d)
         self.mlp = MLP(d)
 
-    def forward(self, x, kv=None):                            # NEW
-        a, new_kv = self.attn(self.ln_1(x), kv)               # NEW
-        x = x + a                                             # NEW
+    def forward(self, x, kv=None):
+        a, new_kv = self.attn(self.ln_1(x), kv)
+        x = x + a
         x = x + self.mlp(self.ln_2(x))
-        return x, new_kv                                      # NEW
+        return x, new_kv
 
 
 class GPT2(nn.Module):
@@ -71,17 +71,17 @@ class GPT2(nn.Module):
         self.lm_head = nn.Linear(d, vocab, bias=False)
         self.lm_head.weight = self.wte.weight
 
-    def forward(self, idx, cache=None):                       # NEW
+    def forward(self, idx, cache=None):
         B, T = idx.shape
-        past = cache[0][0].size(2) if cache is not None else 0     # NEW
-        pos = torch.arange(past, past + T, device=idx.device)      # NEW
+        past = cache[0][0].size(2) if cache is not None else 0
+        pos = torch.arange(past, past + T, device=idx.device)
         x = self.wte(idx) + self.wpe(pos)
-        new_cache = []                                        # NEW
-        for i, block in enumerate(self.h):                    # NEW
-            x, kv = block(x, cache[i] if cache is not None else None)  # NEW
-            new_cache.append(kv)                              # NEW
+        new_cache = []
+        for i, block in enumerate(self.h):
+            x, kv = block(x, cache[i] if cache is not None else None)
+            new_cache.append(kv)
         x = self.ln_f(x)
-        return self.lm_head(x), new_cache                     # NEW
+        return self.lm_head(x), new_cache
 
     @classmethod
     def from_pretrained(cls, name="gpt2"):

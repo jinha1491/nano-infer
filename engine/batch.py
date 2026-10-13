@@ -47,8 +47,11 @@ def block_decode(block, x, kc, vc, lens, L):
 
 
 @torch.no_grad()
-def model_decode(model, idx, cache):
-    L = int(cache.lens.max()) + 1
+def model_decode(model, idx, cache, static=False):
+    if static:
+        L = cache.k.size(3)
+    else:
+        L = int(cache.lens.max()) + 1
     x = model.wte(idx) + model.wpe(cache.lens).unsqueeze(1)
     for i, block in enumerate(model.h):
         x = block_decode(block, x, cache.k[i], cache.v[i], cache.lens, L)
@@ -57,10 +60,11 @@ def model_decode(model, idx, cache):
 
 
 @torch.no_grad()
-def generate_static(model, prompts, max_new_tokens, max_len=512):
+def generate_static(model, prompts, max_new_tokens, max_len=512, static=False):
     cache = SlotCache(model, len(prompts), max_len)
     first = []
     for s, ids in enumerate(prompts):
+        assert ids.size(1) + max_new_tokens <= max_len
         logits, kv = model(ids)
         cache.load(s, kv)
         first.append(logits[:, -1, :].argmax(dim=-1, keepdim=True))
@@ -68,7 +72,7 @@ def generate_static(model, prompts, max_new_tokens, max_len=512):
     cur = torch.cat(first, dim=0)
     generated = [cur]
     for _ in range(max_new_tokens - 1):
-        logits = model_decode(model, cur, cache)
+        logits = model_decode(model, cur, cache, static)
         cur = logits[:, -1, :].argmax(dim=-1, keepdim=True)
         generated.append(cur)
 

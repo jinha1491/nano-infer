@@ -1,5 +1,5 @@
 set -e
-for t in mlp attn model correct batch continuous speculative; do
+for t in mlp attn model correct batch continuous static speculative; do
     echo "=== test_$t ==="
     python tests/test_$t.py
 done

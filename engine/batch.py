@@ -59,9 +59,42 @@ def model_decode(model, idx, cache, static=False):
     return model.lm_head(model.ln_f(x))
 
 
+class GraphedDecoder:
+    def __init__(self, model, cache):
+        n_slots = cache.lens.size(0)
+        self.idx = torch.zeros(n_slots, 1, dtype=torch.long, device=cache.lens.device)
+        saved_lens = cache.lens.clone()
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                model_decode(model, self.idx, cache, static=True)
+        torch.cuda.current_stream().wait_stream(stream)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self.logits = model_decode(model, self.idx, cache, static=True)
+
+        cache.lens.copy_(saved_lens)
+
+    def __call__(self, idx):
+        self.idx.copy_(idx)
+        self.graph.replay()
+        return self.logits
+
+
+def make_decoder(model, cache, mode):
+    if mode == "graph":
+        return GraphedDecoder(model, cache)
+    static = mode == "static"
+    return lambda idx: model_decode(model, idx, cache, static)
+
+
 @torch.no_grad()
-def generate_static(model, prompts, max_new_tokens, max_len=512, static=False):
+def generate_static(model, prompts, max_new_tokens, max_len=512, mode="dynamic"):
     cache = SlotCache(model, len(prompts), max_len)
+    decode = make_decoder(model, cache, mode)
     first = []
     for s, ids in enumerate(prompts):
         assert ids.size(1) + max_new_tokens <= max_len
@@ -72,7 +105,7 @@ def generate_static(model, prompts, max_new_tokens, max_len=512, static=False):
     cur = torch.cat(first, dim=0)
     generated = [cur]
     for _ in range(max_new_tokens - 1):
-        logits = model_decode(model, cur, cache, static)
+        logits = decode(cur)
         cur = logits[:, -1, :].argmax(dim=-1, keepdim=True)
         generated.append(cur)
 

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 import torch
-from engine.batch import SlotCache, model_decode
+from engine.batch import SlotCache, make_decoder
 
 
 @dataclass
@@ -12,8 +12,9 @@ class Request:
 
 
 @torch.no_grad()
-def generate_continuous(model, requests, n_slots, max_len=512, stats=None, static=False):
+def generate_continuous(model, requests, n_slots, max_len=512, stats=None, mode="dynamic"):
     cache = SlotCache(model, n_slots, max_len)
+    decode = make_decoder(model, cache, mode)
     device = cache.lens.device
     queue = list(requests)
     slot_req = [None] * n_slots
@@ -46,7 +47,7 @@ def generate_continuous(model, requests, n_slots, max_len=512, stats=None, stati
         if all(r is None for r in slot_req):
             continue
 
-        logits = model_decode(model, cur, cache, static)
+        logits = decode(cur)
         if stats is not None:
             stats["decode_steps"] += 1
         cur = logits[:, -1, :].argmax(dim=-1, keepdim=True)

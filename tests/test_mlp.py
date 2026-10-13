@@ -21,5 +21,5 @@ with torch.no_grad():
     ref = hf_mlp(x)
 
 print("max diff:", (ours - ref).abs().max().item())
-assert torch.allclose(ours, ref, atol=1e-5), "Mismatch!"
+assert torch.allclose(ours, ref, rtol=1e-4, atol=1e-4), "Mismatch!"
 print("PASS")

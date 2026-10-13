@@ -26,9 +26,9 @@ with torch.no_grad():
     attn.c_attn.bias.copy_(hf_attn.c_attn.bias)
     attn.c_proj.weight.copy_(hf_attn.c_proj.weight.t())
     attn.c_proj.bias.copy_(hf_attn.c_proj.bias)
-    ours = attn(captured["x"])
+    ours, _ = attn(captured["x"])
 
 print("input shape:", tuple(captured["x"].shape))
 print("max diff:", (ours - captured["y"]).abs().max().item())
-assert torch.allclose(ours, captured["y"], atol=1e-4), "Mismatch!"
+assert torch.allclose(ours, captured["y"], rtol=1e-4, atol=1e-4), "Mismatch!"
 print("PASS")

@@ -14,12 +14,11 @@ class Int8Linear(nn.Module):
         scale = scale.clamp(min=1e-8)
         w_q = torch.round(w / scale).clamp(-127, 127).to(torch.int8)
         self.register_buffer("w_q", w_q)
-        self.register_buffer("scale", scale)
+        self.register_buffer("scale", scale.view(-1))
         self.register_buffer("bias", linear.bias.data.clone())
 
     def forward(self, x):
-        w = self.w_q.to(x.dtype) * self.scale
-        return F.linear(x, w, self.bias)
+        return F.linear(x, self.w_q.to(x.dtype)) * self.scale + self.bias
 
 
 def quantize_model(model, per_channel=True):

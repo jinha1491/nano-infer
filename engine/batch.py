@@ -55,12 +55,18 @@ def model_decode(model, idx, cache, static=False):
     x = model.wte(idx) + model.wpe(cache.lens).unsqueeze(1)
     for i, block in enumerate(model.h):
         x = block_decode(block, x, cache.k[i], cache.v[i], cache.lens, L)
-    cache.lens += 1
+    cache.lens.add_(1)
     return model.lm_head(model.ln_f(x))
 
 
+compiled_model_decode = torch.compile(model_decode)
+
+
 class GraphedDecoder:
-    def __init__(self, model, cache):
+    def __init__(self, model, cache, compile=False):
+        fn = compiled_model_decode if compile else model_decode
+        step = lambda idx: fn(model, idx, cache, True)
+
         n_slots = cache.lens.size(0)
         self.idx = torch.zeros(n_slots, 1, dtype=torch.long, device=cache.lens.device)
         saved_lens = cache.lens.clone()
@@ -69,12 +75,12 @@ class GraphedDecoder:
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
             for _ in range(3):
-                model_decode(model, self.idx, cache, static=True)
+                step(self.idx)
         torch.cuda.current_stream().wait_stream(stream)
 
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph):
-            self.logits = model_decode(model, self.idx, cache, static=True)
+            self.logits = step(self.idx)
 
         cache.lens.copy_(saved_lens)
 
@@ -87,6 +93,8 @@ class GraphedDecoder:
 def make_decoder(model, cache, mode):
     if mode == "graph":
         return GraphedDecoder(model, cache)
+    if mode == "compiled":
+        return GraphedDecoder(model, cache, compile=True)
     static = mode == "static"
     return lambda idx: model_decode(model, idx, cache, static)
 

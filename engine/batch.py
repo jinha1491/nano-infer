@@ -6,16 +6,16 @@ class SlotCache:
     def __init__(self, model, n_slots, max_len):
         attn = model.h[0].attn
         device = model.wte.weight.device
-        shape = (len(model.h), n_slots, attn.n_head, max_len, attn.d_head)
-        self.k = torch.zeros(shape, device=device)
-        self.v = torch.zeros(shape, device=device)
+        shape = (n_slots, attn.n_head, max_len, attn.d_head)
+        self.k = [torch.zeros(shape, device=device) for _ in model.h]
+        self.v = [torch.zeros(shape, device=device) for _ in model.h]
         self.lens = torch.zeros(n_slots, dtype=torch.long, device=device)
 
     def load(self, slot, kv):
         T = kv[0][0].size(2)
         for i, (k, v) in enumerate(kv):
-            self.k[i, slot, :, :T] = k[0]
-            self.v[i, slot, :, :T] = v[0]
+            self.k[i][slot, :, :T] = k[0]
+            self.v[i][slot, :, :T] = v[0]
         self.lens[slot] = T
 
 
@@ -49,7 +49,7 @@ def block_decode(block, x, kc, vc, lens, L):
 @torch.no_grad()
 def model_decode(model, idx, cache, static=False):
     if static:
-        L = cache.k.size(3)
+        L = cache.k[0].size(2)
     else:
         L = int(cache.lens.max()) + 1
     x = model.wte(idx) + model.wpe(cache.lens).unsqueeze(1)
@@ -59,6 +59,11 @@ def model_decode(model, idx, cache, static=False):
     return model.lm_head(model.ln_f(x))
 
 
+import torch._dynamo.config
+import torch._inductor.config
+
+torch._dynamo.config.automatic_dynamic_shapes = False
+torch._inductor.config.coordinate_descent_tuning = True
 compiled_model_decode = torch.compile(model_decode)
 
 

@@ -90,4 +90,5 @@ def generate_continuous(model, requests, n_slots, max_len=512, stats=None, mode=
         cache.check_no_leaks()
         if stats is not None:
             stats["peak_blocks"] = cache.peak_used
+            stats["evictions"] = cache.evictions
     return results

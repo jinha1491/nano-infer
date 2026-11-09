@@ -135,7 +135,7 @@ class Qwen(nn.Module):
         return self.lm_head(self.norm(x)), new_cache
 
     @classmethod
-    def from_pretrained(cls, name="Qwen/Qwen3-0.6B", max_pos=4096):
+    def from_pretrained(cls, name="Qwen/Qwen3-0.6B", max_pos=4096, dtype=torch.float32):
         from transformers import AutoModelForCausalLM
         hf = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32)
         c = hf.config
@@ -152,4 +152,4 @@ class Qwen(nn.Module):
             for name, param in model.state_dict().items():
                 hf_name = name if name == "lm_head.weight" else "model." + name
                 param.copy_(hf_sd[hf_name])
-        return model.eval()
+        return model.to(dtype).eval()

@@ -1,4 +1,6 @@
+import hashlib
 import math
+import struct
 from collections import OrderedDict
 import torch
 
@@ -28,6 +30,7 @@ class PagedCache:
         self.reserved = [0] * n_slots
         self.host_lens = [0] * n_slots
         self.peak_used = 0
+        self.evictions = 0
 
         self.block_of = {}
         self.key_of = {}
@@ -49,6 +52,7 @@ class PagedCache:
         else:
             b, _ = self.evictable.popitem(last=False)
             del self.block_of[self.key_of.pop(b)]
+            self.evictions += 1
         self.ref[b] = 1
         return b
 
@@ -68,9 +72,10 @@ class PagedCache:
         self.peak_used = max(self.peak_used, used)
 
     def _keys(self, tokens):
-        keys, key = [], None
+        keys, key = [], b""
         for j in range(len(tokens) // self.bs):
-            key = hash((key, tuple(tokens[j * self.bs:(j + 1) * self.bs])))
+            block = tokens[j * self.bs:(j + 1) * self.bs]
+            key = hashlib.sha256(key + struct.pack(f"{len(block)}i", *block)).digest()
             keys.append(key)
         return keys
 
@@ -126,7 +131,7 @@ class PagedCache:
             self.host_lens[s] += 1
 
     def release(self, slot):
-        for b in self.owned[slot]:
+        for b in reversed(self.owned[slot]):
             self.ref[b] -= 1
             if self.ref[b] == 0:
                 if b in self.key_of:

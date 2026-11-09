@@ -54,8 +54,9 @@ _, st = run(2, 128, prefix=True)
 report("prefix cache on, 2 slots", st)
 _, st = run(1, 128, prefix=True)
 report("prefix cache on, 1 slot (blocks reused after the owner finished)", st)
-_, st = run(2, 14, prefix=True)
-report("prefix cache on, small pool (cached blocks get evicted)", st)
+_, st = run(1, 7, prefix=True)
+assert st["evictions"] > 0, "small pool should have forced evictions"
+report(f"prefix cache on, 6-block pool ({st['evictions']} evictions)", st)
 
 if dev == "cuda":
     run(2, 128, prefix=True, mode="static")

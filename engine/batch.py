@@ -18,13 +18,31 @@ class SlotCache:
         self.k = [torch.zeros(shape, **kw) for _ in layers]
         self.v = [torch.zeros(shape, **kw) for _ in layers]
         self.lens = torch.zeros(n_slots, dtype=torch.long, device=weight.device)
+        self.max_len = max_len
 
-    def load(self, slot, kv):
+    def load(self, slot, kv, reserve=None):
         T = kv[0][0].size(2)
         for i, (k, v) in enumerate(kv):
             self.k[i][slot, :, :T] = k[0]
             self.v[i][slot, :, :T] = v[0]
         self.lens[slot] = T
+
+    def can_admit(self, n_tokens):
+        return True
+
+    def prepare_step(self, active):
+        pass
+
+    def release(self, slot):
+        self.lens[slot] = 0
+
+    def write(self, i, k, v):
+        slots = torch.arange(k.size(0), device=k.device)
+        self.k[i][slots, :, self.lens] = k
+        self.v[i][slots, :, self.lens] = v
+
+    def read(self, i, L):
+        return self.k[i][:, :, :L], self.v[i][:, :, :L]
 
 
 def attn_decode(attn, x, kc, vc, lens, L):
@@ -59,7 +77,7 @@ def rope_decode(x, cos, sin):
     return x * cos + torch.cat([-x2, x1], dim=-1) * sin
 
 
-def qwen_attn_decode(attn, x, cos, sin, kc, vc, lens, L):
+def qwen_attn_decode(attn, x, cos, sin, cache, i, L):
     S = x.size(0)
     H, KV, D, R = attn.n_head, attn.n_kv_head, attn.d_head, attn.n_rep
     q = attn.q_proj(x).view(S, KV, R, D)
@@ -71,22 +89,21 @@ def qwen_attn_decode(attn, x, cos, sin, kc, vc, lens, L):
     q = rope_decode(q, cos[:, None, None, :], sin[:, None, None, :])
     k = rope_decode(k, cos[:, None, :], sin[:, None, :])
 
-    slots = torch.arange(S, device=x.device)
-    kc[slots, :, lens] = k
-    vc[slots, :, lens] = v
+    cache.write(i, k, v)
+    K, V = cache.read(i, L)
 
-    att = (q @ kc[:, :, :L].transpose(-2, -1)) / (D ** 0.5)
-    mask = torch.arange(L, device=x.device)[None, :] <= lens[:, None]
+    att = (q @ K.transpose(-2, -1)) / (D ** 0.5)
+    mask = torch.arange(K.size(2), device=x.device)[None, :] <= cache.lens[:, None]
     att = att.masked_fill(~mask[:, None, None, :], float("-inf"))
     att = F.softmax(att.float(), dim=-1).to(q.dtype)
 
-    y = (att @ vc[:, :, :L]).reshape(S, 1, H * D)
+    y = (att @ V).reshape(S, 1, H * D)
     return attn.o_proj(y)
 
 
-def qwen_layer_decode(layer, x, cos, sin, kc, vc, lens, L):
+def qwen_layer_decode(layer, x, cos, sin, cache, i, L):
     x = x + qwen_attn_decode(layer.self_attn, layer.input_layernorm(x),
-                             cos, sin, kc, vc, lens, L)
+                             cos, sin, cache, i, L)
     x = x + layer.mlp(layer.post_attention_layernorm(x))
     return x
 
@@ -94,7 +111,7 @@ def qwen_layer_decode(layer, x, cos, sin, kc, vc, lens, L):
 @torch.no_grad()
 def model_decode(model, idx, cache, static=False):
     if static:
-        L = cache.k[0].size(2)
+        L = cache.max_len
     else:
         L = int(cache.lens.max()) + 1
 
@@ -102,7 +119,7 @@ def model_decode(model, idx, cache, static=False):
         cos, sin = model.cos[cache.lens], model.sin[cache.lens]
         x = model.embed_tokens(idx)
         for i, layer in enumerate(model.layers):
-            x = qwen_layer_decode(layer, x, cos, sin, cache.k[i], cache.v[i], cache.lens, L)
+            x = qwen_layer_decode(layer, x, cos, sin, cache, i, L)
         logits = model.lm_head(model.norm(x))
     else:
         x = model.wte(idx) + model.wpe(cache.lens).unsqueeze(1)

@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 import torch
 from engine.batch import SlotCache, make_decoder
 from engine.paged import PagedCache
+from engine.sampling import sample
 
 
 @dataclass
@@ -9,21 +10,26 @@ class Request:
     rid: int
     prompt: torch.Tensor
     max_new_tokens: int
+    temperature: float = 0.0
+    top_p: float = 1.0
     out: list = field(default_factory=list)
 
 
 @torch.no_grad()
 def generate_continuous(model, requests, n_slots, max_len=512, stats=None, mode="dynamic",
-                        n_blocks=None, block_size=16, prefix_cache=False):
+                        n_blocks=None, block_size=16, prefix_cache=False, seed=0):
     if n_blocks is None:
         cache = SlotCache(model, n_slots, max_len)
     else:
         cache = PagedCache(model, n_slots, n_blocks, block_size, max_len, prefix_cache)
     decode = make_decoder(model, cache, mode)
     device = cache.lens.device
+    gen = torch.Generator(device=device).manual_seed(seed)
     queue = list(requests)
     slot_req = [None] * n_slots
     cur = torch.zeros(n_slots, 1, dtype=torch.long, device=device)
+    temps = torch.zeros(n_slots, device=device)
+    top_ps = torch.ones(n_slots, device=device)
     results = {}
     if stats is not None:
         stats.update(decode_steps=0, prefills=0, busy_slot_steps=0,
@@ -32,6 +38,7 @@ def generate_continuous(model, requests, n_slots, max_len=512, stats=None, mode=
     def finish(s, req):
         results[req.rid] = torch.cat([req.prompt[0].cpu(), torch.tensor(req.out)])
         slot_req[s] = None
+        temps[s], top_ps[s] = 0.0, 1.0
         cache.release(s)
 
     while queue or any(r is not None for r in slot_req):
@@ -52,7 +59,8 @@ def generate_continuous(model, requests, n_slots, max_len=512, stats=None, mode=
             else:
                 logits, kv = model(req.prompt)
             cache.load(s, kv, reserve=total, tokens=tokens, hits=hits)
-            nid = int(logits[0, -1].argmax())
+            temps[s], top_ps[s] = req.temperature, req.top_p
+            nid = int(sample(logits[:, -1], temps[s:s + 1], top_ps[s:s + 1], gen))
             req.out.append(nid)
             cur[s, 0] = nid
             slot_req[s] = req
@@ -74,7 +82,7 @@ def generate_continuous(model, requests, n_slots, max_len=512, stats=None, mode=
         if stats is not None:
             stats["decode_steps"] += 1
             stats["busy_slot_steps"] += len(active)
-        cur = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        cur = sample(logits[:, -1], temps, top_ps, gen)
         toks = cur[:, 0].tolist()
 
         for s in range(n_slots):

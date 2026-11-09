@@ -3,15 +3,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 from transformers import AutoTokenizer
-from engine.qwen import Qwen2
+from engine.qwen import Qwen
 from engine.kv import generate_kv
 from engine.batch import generate_static
 from engine.continuous import Request, generate_continuous
 
-name = "Qwen/Qwen2.5-0.5B"
+name = sys.argv[1] if len(sys.argv) > 1 else "Qwen/Qwen3-0.6B"
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 tok = AutoTokenizer.from_pretrained(name)
-model = Qwen2.from_pretrained(name).to(dev)
+model = Qwen.from_pretrained(name).to(dev)
 
 texts = [
     "The best poker players know that",

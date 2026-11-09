@@ -1,11 +1,11 @@
 import torch
 import torch.nn.functional as F
-from engine.qwen import Qwen2
+from engine.qwen import Qwen
 
 
 class SlotCache:
     def __init__(self, model, n_slots, max_len):
-        if isinstance(model, Qwen2):
+        if isinstance(model, Qwen):
             attn, layers = model.layers[0].self_attn, model.layers
             n_kv = attn.n_kv_head
             weight = model.embed_tokens.weight
@@ -65,6 +65,8 @@ def qwen_attn_decode(attn, x, cos, sin, kc, vc, lens, L):
     q = attn.q_proj(x).view(S, KV, R, D)
     k = attn.k_proj(x).view(S, KV, D)
     v = attn.v_proj(x).view(S, KV, D)
+    if attn.q_norm is not None:
+        q, k = attn.q_norm(q), attn.k_norm(k)
 
     q = rope_decode(q, cos[:, None, None, :], sin[:, None, None, :])
     k = rope_decode(k, cos[:, None, :], sin[:, None, :])
@@ -96,7 +98,7 @@ def model_decode(model, idx, cache, static=False):
     else:
         L = int(cache.lens.max()) + 1
 
-    if isinstance(model, Qwen2):
+    if isinstance(model, Qwen):
         cos, sin = model.cos[cache.lens], model.sin[cache.lens]
         x = model.embed_tokens(idx)
         for i, layer in enumerate(model.layers):

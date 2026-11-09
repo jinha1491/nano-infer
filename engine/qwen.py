@@ -44,22 +44,27 @@ class MLP(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, d, n_head, n_kv_head):
+    def __init__(self, d, n_head, n_kv_head, d_head, bias, qk_norm, eps):
         super().__init__()
         self.n_head = n_head
         self.n_kv_head = n_kv_head
-        self.d_head = d // n_head
+        self.d_head = d_head
         self.n_rep = n_head // n_kv_head
-        self.q_proj = nn.Linear(d, n_head * self.d_head, bias=True)
-        self.k_proj = nn.Linear(d, n_kv_head * self.d_head, bias=True)
-        self.v_proj = nn.Linear(d, n_kv_head * self.d_head, bias=True)
-        self.o_proj = nn.Linear(n_head * self.d_head, d, bias=False)
+        self.q_proj = nn.Linear(d, n_head * d_head, bias=bias)
+        self.k_proj = nn.Linear(d, n_kv_head * d_head, bias=bias)
+        self.v_proj = nn.Linear(d, n_kv_head * d_head, bias=bias)
+        self.o_proj = nn.Linear(n_head * d_head, d, bias=False)
+        self.q_norm = RMSNorm(d_head, eps) if qk_norm else None
+        self.k_norm = RMSNorm(d_head, eps) if qk_norm else None
 
     def forward(self, x, cos, sin, kv=None):
         B, T, _ = x.shape
-        q = self.q_proj(x).view(B, T, self.n_head, self.d_head).transpose(1, 2)
-        k = self.k_proj(x).view(B, T, self.n_kv_head, self.d_head).transpose(1, 2)
+        q = self.q_proj(x).view(B, T, self.n_head, self.d_head)
+        k = self.k_proj(x).view(B, T, self.n_kv_head, self.d_head)
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.d_head).transpose(1, 2)
+        if self.q_norm is not None:
+            q, k = self.q_norm(q), self.k_norm(k)
+        q, k = q.transpose(1, 2), k.transpose(1, 2)
 
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
@@ -84,10 +89,10 @@ class Attention(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, d, n_head, n_kv_head, d_ff, eps):
+    def __init__(self, d, n_head, n_kv_head, d_head, d_ff, bias, qk_norm, eps):
         super().__init__()
         self.input_layernorm = RMSNorm(d, eps)
-        self.self_attn = Attention(d, n_head, n_kv_head)
+        self.self_attn = Attention(d, n_head, n_kv_head, d_head, bias, qk_norm, eps)
         self.post_attention_layernorm = RMSNorm(d, eps)
         self.mlp = MLP(d, d_ff)
 
@@ -98,19 +103,21 @@ class Block(nn.Module):
         return x, new_kv
 
 
-class Qwen2(nn.Module):
-    def __init__(self, n_layer, n_head, n_kv_head, d, d_ff, vocab,
-                 max_pos=4096, theta=1e6, eps=1e-6, tie=True):
+class Qwen(nn.Module):
+    def __init__(self, n_layer, n_head, n_kv_head, d, d_ff, vocab, d_head=None,
+                 bias=True, qk_norm=False, max_pos=4096, theta=1e6, eps=1e-6, tie=True):
         super().__init__()
+        d_head = d_head or d // n_head
         self.embed_tokens = nn.Embedding(vocab, d)
         self.layers = nn.ModuleList(
-            [Block(d, n_head, n_kv_head, d_ff, eps) for _ in range(n_layer)])
+            [Block(d, n_head, n_kv_head, d_head, d_ff, bias, qk_norm, eps)
+             for _ in range(n_layer)])
         self.norm = RMSNorm(d, eps)
         self.lm_head = nn.Linear(d, vocab, bias=False)
         if tie:
             self.lm_head.weight = self.embed_tokens.weight
 
-        cos, sin = rope_tables(d // n_head, max_pos, theta)
+        cos, sin = rope_tables(d_head, max_pos, theta)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -128,14 +135,17 @@ class Qwen2(nn.Module):
         return self.lm_head(self.norm(x)), new_cache
 
     @classmethod
-    def from_pretrained(cls, name="Qwen/Qwen2.5-0.5B", max_pos=4096):
+    def from_pretrained(cls, name="Qwen/Qwen3-0.6B", max_pos=4096):
         from transformers import AutoModelForCausalLM
-        hf = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float32)
+        hf = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32)
         c = hf.config
         theta = getattr(c, "rope_theta", None) or c.rope_parameters["rope_theta"]
+        is_qwen3 = c.model_type == "qwen3"
         model = cls(c.num_hidden_layers, c.num_attention_heads, c.num_key_value_heads,
                     c.hidden_size, c.intermediate_size, c.vocab_size,
-                    max_pos, theta, c.rms_norm_eps, c.tie_word_embeddings)
+                    d_head=getattr(c, "head_dim", None), bias=not is_qwen3,
+                    qk_norm=is_qwen3, max_pos=max_pos, theta=theta,
+                    eps=c.rms_norm_eps, tie=c.tie_word_embeddings)
 
         hf_sd = hf.state_dict()
         with torch.no_grad():

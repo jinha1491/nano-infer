@@ -1,15 +1,23 @@
 import torch
 import torch.nn.functional as F
+from engine.qwen import Qwen2
 
 
 class SlotCache:
     def __init__(self, model, n_slots, max_len):
-        attn = model.h[0].attn
-        device = model.wte.weight.device
-        shape = (n_slots, attn.n_head, max_len, attn.d_head)
-        self.k = [torch.zeros(shape, device=device) for _ in model.h]
-        self.v = [torch.zeros(shape, device=device) for _ in model.h]
-        self.lens = torch.zeros(n_slots, dtype=torch.long, device=device)
+        if isinstance(model, Qwen2):
+            attn, layers = model.layers[0].self_attn, model.layers
+            n_kv = attn.n_kv_head
+            weight = model.embed_tokens.weight
+        else:
+            attn, layers = model.h[0].attn, model.h
+            n_kv = attn.n_head
+            weight = model.wte.weight
+        shape = (n_slots, n_kv, max_len, attn.d_head)
+        kw = dict(device=weight.device, dtype=weight.dtype)
+        self.k = [torch.zeros(shape, **kw) for _ in layers]
+        self.v = [torch.zeros(shape, **kw) for _ in layers]
+        self.lens = torch.zeros(n_slots, dtype=torch.long, device=weight.device)
 
     def load(self, slot, kv):
         T = kv[0][0].size(2)
@@ -46,17 +54,62 @@ def block_decode(block, x, kc, vc, lens, L):
     return x
 
 
+def rope_decode(x, cos, sin):
+    x1, x2 = x.chunk(2, dim=-1)
+    return x * cos + torch.cat([-x2, x1], dim=-1) * sin
+
+
+def qwen_attn_decode(attn, x, cos, sin, kc, vc, lens, L):
+    S = x.size(0)
+    H, KV, D, R = attn.n_head, attn.n_kv_head, attn.d_head, attn.n_rep
+    q = attn.q_proj(x).view(S, KV, R, D)
+    k = attn.k_proj(x).view(S, KV, D)
+    v = attn.v_proj(x).view(S, KV, D)
+
+    q = rope_decode(q, cos[:, None, None, :], sin[:, None, None, :])
+    k = rope_decode(k, cos[:, None, :], sin[:, None, :])
+
+    slots = torch.arange(S, device=x.device)
+    kc[slots, :, lens] = k
+    vc[slots, :, lens] = v
+
+    att = (q @ kc[:, :, :L].transpose(-2, -1)) / (D ** 0.5)
+    mask = torch.arange(L, device=x.device)[None, :] <= lens[:, None]
+    att = att.masked_fill(~mask[:, None, None, :], float("-inf"))
+    att = F.softmax(att.float(), dim=-1).to(q.dtype)
+
+    y = (att @ vc[:, :, :L]).reshape(S, 1, H * D)
+    return attn.o_proj(y)
+
+
+def qwen_layer_decode(layer, x, cos, sin, kc, vc, lens, L):
+    x = x + qwen_attn_decode(layer.self_attn, layer.input_layernorm(x),
+                             cos, sin, kc, vc, lens, L)
+    x = x + layer.mlp(layer.post_attention_layernorm(x))
+    return x
+
+
 @torch.no_grad()
 def model_decode(model, idx, cache, static=False):
     if static:
         L = cache.k[0].size(2)
     else:
         L = int(cache.lens.max()) + 1
-    x = model.wte(idx) + model.wpe(cache.lens).unsqueeze(1)
-    for i, block in enumerate(model.h):
-        x = block_decode(block, x, cache.k[i], cache.v[i], cache.lens, L)
+
+    if isinstance(model, Qwen2):
+        cos, sin = model.cos[cache.lens], model.sin[cache.lens]
+        x = model.embed_tokens(idx)
+        for i, layer in enumerate(model.layers):
+            x = qwen_layer_decode(layer, x, cos, sin, cache.k[i], cache.v[i], cache.lens, L)
+        logits = model.lm_head(model.norm(x))
+    else:
+        x = model.wte(idx) + model.wpe(cache.lens).unsqueeze(1)
+        for i, block in enumerate(model.h):
+            x = block_decode(block, x, cache.k[i], cache.v[i], cache.lens, L)
+        logits = model.lm_head(model.ln_f(x))
+
     cache.lens.add_(1)
-    return model.lm_head(model.ln_f(x))
+    return logits
 
 
 import torch._dynamo.config

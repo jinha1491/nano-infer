@@ -136,20 +136,34 @@ class Qwen(nn.Module):
 
     @classmethod
     def from_pretrained(cls, name="Qwen/Qwen3-0.6B", max_pos=4096, dtype=torch.float32):
-        from transformers import AutoModelForCausalLM
-        hf = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32)
-        c = hf.config
+        import glob
+        from huggingface_hub import snapshot_download
+        from safetensors import safe_open
+        from transformers import AutoConfig
+
+        c = AutoConfig.from_pretrained(name)
         theta = getattr(c, "rope_theta", None) or c.rope_parameters["rope_theta"]
         is_qwen3 = c.model_type == "qwen3"
         model = cls(c.num_hidden_layers, c.num_attention_heads, c.num_key_value_heads,
                     c.hidden_size, c.intermediate_size, c.vocab_size,
                     d_head=getattr(c, "head_dim", None), bias=not is_qwen3,
                     qk_norm=is_qwen3, max_pos=max_pos, theta=theta,
-                    eps=c.rms_norm_eps, tie=c.tie_word_embeddings)
+                    eps=c.rms_norm_eps, tie=c.tie_word_embeddings).to(dtype)
 
-        hf_sd = hf.state_dict()
+        path = snapshot_download(name, allow_patterns=["*.safetensors"])
+        sd = model.state_dict()
+        loaded = set()
         with torch.no_grad():
-            for name, param in model.state_dict().items():
-                hf_name = name if name == "lm_head.weight" else "model." + name
-                param.copy_(hf_sd[hf_name])
-        return model.to(dtype).eval()
+            for f in sorted(glob.glob(f"{path}/*.safetensors")):
+                with safe_open(f, framework="pt") as fh:
+                    for key in fh.keys():
+                        ours = key.removeprefix("model.")
+                        if ours in sd:
+                            sd[ours].copy_(fh.get_tensor(key))
+                            loaded.add(ours)
+
+        missing = set(sd) - loaded
+        if c.tie_word_embeddings:
+            missing.discard("lm_head.weight")
+        assert not missing, f"weights missing from checkpoint: {sorted(missing)[:5]}"
+        return model.eval()

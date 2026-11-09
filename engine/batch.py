@@ -20,7 +20,10 @@ class SlotCache:
         self.lens = torch.zeros(n_slots, dtype=torch.long, device=weight.device)
         self.max_len = max_len
 
-    def load(self, slot, kv, reserve=None):
+    def match_prefix(self, tokens):
+        return []
+
+    def load(self, slot, kv, reserve=None, tokens=None, hits=()):
         T = kv[0][0].size(2)
         for i, (k, v) in enumerate(kv):
             self.k[i][slot, :, :T] = k[0]

@@ -14,11 +14,11 @@ class Request:
 
 @torch.no_grad()
 def generate_continuous(model, requests, n_slots, max_len=512, stats=None, mode="dynamic",
-                        n_blocks=None, block_size=16):
+                        n_blocks=None, block_size=16, prefix_cache=False):
     if n_blocks is None:
         cache = SlotCache(model, n_slots, max_len)
     else:
-        cache = PagedCache(model, n_slots, n_blocks, block_size, max_len)
+        cache = PagedCache(model, n_slots, n_blocks, block_size, max_len, prefix_cache)
     decode = make_decoder(model, cache, mode)
     device = cache.lens.device
     queue = list(requests)
@@ -26,7 +26,8 @@ def generate_continuous(model, requests, n_slots, max_len=512, stats=None, mode=
     cur = torch.zeros(n_slots, 1, dtype=torch.long, device=device)
     results = {}
     if stats is not None:
-        stats.update(decode_steps=0, prefills=0, busy_slot_steps=0)
+        stats.update(decode_steps=0, prefills=0, busy_slot_steps=0,
+                     prefill_tokens=0, cached_tokens=0)
 
     def finish(s, req):
         results[req.rid] = torch.cat([req.prompt[0].cpu(), torch.tensor(req.out)])
@@ -43,14 +44,22 @@ def generate_continuous(model, requests, n_slots, max_len=512, stats=None, mode=
             if not cache.can_admit(total):
                 break
             queue.pop(0)
-            logits, kv = model(req.prompt)
-            cache.load(s, kv, reserve=total)
+            tokens = req.prompt[0].tolist()
+            hits = cache.match_prefix(tokens)
+            n_hit = len(hits) * block_size
+            if hits:
+                logits, kv = model(req.prompt[:, n_hit:], cache.gather(hits))
+            else:
+                logits, kv = model(req.prompt)
+            cache.load(s, kv, reserve=total, tokens=tokens, hits=hits)
             nid = int(logits[0, -1].argmax())
             req.out.append(nid)
             cur[s, 0] = nid
             slot_req[s] = req
             if stats is not None:
                 stats["prefills"] += 1
+                stats["prefill_tokens"] += len(tokens) - n_hit
+                stats["cached_tokens"] += n_hit
             if len(req.out) >= req.max_new_tokens:
                 finish(s, req)
 
@@ -78,7 +87,7 @@ def generate_continuous(model, requests, n_slots, max_len=512, stats=None, mode=
                 finish(s, req)
 
     if n_blocks is not None:
-        assert len(cache.free) == n_blocks - 1, "blocks leaked"
+        cache.check_no_leaks()
         if stats is not None:
             stats["peak_blocks"] = cache.peak_used
     return results

@@ -19,7 +19,11 @@ class Int8Linear(nn.Module):
         self.register_buffer("bias", bias)
 
     def forward(self, x):
-        y = F.linear(x, self.w_q.to(x.dtype)) * self.scale.to(x.dtype)
+        scale = self.scale.to(x.dtype)
+        if x.dtype == torch.float32:
+            y = F.linear(x, self.w_q.to(x.dtype)) * scale
+        else:
+            y = F.linear(x, self.w_q.to(x.dtype) * scale[:, None])
         return y + self.bias if self.bias is not None else y
 
 

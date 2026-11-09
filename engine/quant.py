@@ -15,17 +15,21 @@ class Int8Linear(nn.Module):
         w_q = torch.round(w / scale).clamp(-127, 127).to(torch.int8)
         self.register_buffer("w_q", w_q)
         self.register_buffer("scale", scale.view(-1))
-        self.register_buffer("bias", linear.bias.data.clone())
+        bias = linear.bias.data.clone() if linear.bias is not None else None
+        self.register_buffer("bias", bias)
 
     def forward(self, x):
-        return F.linear(x, self.w_q.to(x.dtype)) * self.scale + self.bias
+        y = F.linear(x, self.w_q.to(x.dtype)) * self.scale.to(x.dtype)
+        return y + self.bias if self.bias is not None else y
 
 
 def quantize_model(model, per_channel=True):
-    for block in model.h:
-        for parent, name in [(block.attn, "c_attn"), (block.attn, "c_proj"),
-                             (block.mlp, "c_fc"), (block.mlp, "c_proj")]:
-            setattr(parent, name, Int8Linear(getattr(parent, name), per_channel))
+    blocks = model.layers if hasattr(model, "layers") else model.h
+    for block in blocks:
+        for parent in list(block.modules()):
+            for name, child in list(parent.named_children()):
+                if isinstance(child, nn.Linear):
+                    setattr(parent, name, Int8Linear(child, per_channel))
     return model
 
 
